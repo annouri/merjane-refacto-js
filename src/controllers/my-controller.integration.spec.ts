@@ -17,6 +17,8 @@ import {
 import {type Database} from '@/db/type.js';
 import {buildFastify} from '@/fastify.js';
 
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
 describe('MyController Integration Tests', () => {
 	let fastify: FastifyInstance;
 	let database: Database;
@@ -36,6 +38,19 @@ describe('MyController Integration Tests', () => {
 		await fastify.close();
 	});
 
+	function createOrderWithProduct(product: ProductInsert): {orderId: number; productId: number} {
+		return database.transaction(tx => {
+			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
+			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
+			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
+			return {orderId: order!.orderId, productId: insertedProduct.productId};
+		});
+	}
+
+	function findProduct(productId: number) {
+		return database.query.products.findFirst({where: eq(products.id, productId)});
+	}
+
 	it('ProcessOrderShouldReturn', async () => {
 		const client = supertest(fastify.server);
 		const allProducts = createProducts();
@@ -53,44 +68,34 @@ describe('MyController Integration Tests', () => {
 	});
 
 	// NORMAL Product Tests
-	it('NORMAL - en stock : available décrémenté', async () => {
+	it('NORMAL - in stock: available decremented', async () => {
 		const client = supertest(fastify.server);
 		const product: ProductInsert = {
 			leadTime: 15, available: 30, type: 'NORMAL', name: 'USB Cable',
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(29);
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendOutOfStockNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendExpirationNotification).not.toHaveBeenCalled();
 	});
 
-	it('NORMAL - en rupture avec leadTime > 0 : notification de délai, stock inchangé, leadTime mis à jour', async () => {
+	it('NORMAL - out of stock with leadTime > 0: delay notification, stock unchanged, leadTime updated', async () => {
 		const client = supertest(fastify.server);
 		const product: ProductInsert = {
 			leadTime: 10, available: 0, type: 'NORMAL', name: 'USB Dongle',
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(0);
 		expect(updatedProduct!.leadTime).toBe(10);
 		expect(notificationServiceMock.sendDelayNotification).toHaveBeenCalledWith(10, 'USB Dongle');
@@ -98,22 +103,17 @@ describe('MyController Integration Tests', () => {
 		expect(notificationServiceMock.sendExpirationNotification).not.toHaveBeenCalled();
 	});
 
-	it('NORMAL - en rupture avec leadTime = 0 : aucune action', async () => {
+	it('NORMAL - out of stock with leadTime = 0: no action', async () => {
 		const client = supertest(fastify.server);
 		const product: ProductInsert = {
 			leadTime: 0, available: 0, type: 'NORMAL', name: 'Keyboard',
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(0);
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendOutOfStockNotification).not.toHaveBeenCalled();
@@ -121,56 +121,44 @@ describe('MyController Integration Tests', () => {
 	});
 
 	// SEASONAL Product Tests
-	it('SEASONAL - en saison et en stock : available décrémenté', async () => {
+	it('SEASONAL - in season and in stock: available decremented', async () => {
 		const client = supertest(fastify.server);
-		const d = 24 * 60 * 60 * 1000;
 		const product: ProductInsert = {
 			leadTime: 15,
 			available: 30,
 			type: 'SEASONAL',
 			name: 'Watermelon',
-			seasonStartDate: new Date(Date.now() - (2 * d)),
-			seasonEndDate: new Date(Date.now() + (58 * d)),
+			seasonStartDate: new Date(Date.now() - (2 * MILLISECONDS_PER_DAY)),
+			seasonEndDate: new Date(Date.now() + (58 * MILLISECONDS_PER_DAY)),
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(29);
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendOutOfStockNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendExpirationNotification).not.toHaveBeenCalled();
 	});
 
-	it('SEASONAL - en saison, en rupture, délai dans la saison : notification de délai', async () => {
+	it('SEASONAL - in season, out of stock, delay within season: delay notification', async () => {
 		const client = supertest(fastify.server);
-		const d = 24 * 60 * 60 * 1000;
 		const product: ProductInsert = {
 			leadTime: 10,
 			available: 0,
 			type: 'SEASONAL',
 			name: 'Strawberry',
-			seasonStartDate: new Date(Date.now() - (2 * d)),
-			seasonEndDate: new Date(Date.now() + (58 * d)),
+			seasonStartDate: new Date(Date.now() - (2 * MILLISECONDS_PER_DAY)),
+			seasonEndDate: new Date(Date.now() + (58 * MILLISECONDS_PER_DAY)),
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(0);
 		expect(updatedProduct!.leadTime).toBe(10);
 		expect(notificationServiceMock.sendDelayNotification).toHaveBeenCalledWith(10, 'Strawberry');
@@ -178,56 +166,44 @@ describe('MyController Integration Tests', () => {
 		expect(notificationServiceMock.sendExpirationNotification).not.toHaveBeenCalled();
 	});
 
-	it('SEASONAL - en saison, en rupture, délai au-delà de la fin de saison : notification out-of-stock', async () => {
+	it('SEASONAL - in season, out of stock, delay beyond season end: out-of-stock notification', async () => {
 		const client = supertest(fastify.server);
-		const d = 24 * 60 * 60 * 1000;
 		const product: ProductInsert = {
 			leadTime: 90,
 			available: 0,
 			type: 'SEASONAL',
 			name: 'Blueberry',
-			seasonStartDate: new Date(Date.now() - (2 * d)),
-			seasonEndDate: new Date(Date.now() + (20 * d)),
+			seasonStartDate: new Date(Date.now() - (2 * MILLISECONDS_PER_DAY)),
+			seasonEndDate: new Date(Date.now() + (20 * MILLISECONDS_PER_DAY)),
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(0);
 		expect(notificationServiceMock.sendOutOfStockNotification).toHaveBeenCalledWith('Blueberry');
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendExpirationNotification).not.toHaveBeenCalled();
 	});
 
-	it('SEASONAL - avant le début de la saison avec stock : notification out-of-stock', async () => {
+	it('SEASONAL - before season start with stock: out-of-stock notification', async () => {
 		const client = supertest(fastify.server);
-		const d = 24 * 60 * 60 * 1000;
 		const product: ProductInsert = {
 			leadTime: 15,
 			available: 30,
 			type: 'SEASONAL',
 			name: 'Grapes',
-			seasonStartDate: new Date(Date.now() + (180 * d)),
-			seasonEndDate: new Date(Date.now() + (240 * d)),
+			seasonStartDate: new Date(Date.now() + (180 * MILLISECONDS_PER_DAY)),
+			seasonEndDate: new Date(Date.now() + (240 * MILLISECONDS_PER_DAY)),
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(30);
 		expect(notificationServiceMock.sendOutOfStockNotification).toHaveBeenCalledWith('Grapes');
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
@@ -235,81 +211,63 @@ describe('MyController Integration Tests', () => {
 	});
 
 	// EXPIRABLE Product Tests
-	it('EXPIRABLE - non expiré et en stock : available décrémenté', async () => {
+	it('EXPIRABLE - not expired and in stock: available decremented', async () => {
 		const client = supertest(fastify.server);
-		const d = 24 * 60 * 60 * 1000;
 		const product: ProductInsert = {
 			leadTime: 15,
 			available: 30,
 			type: 'EXPIRABLE',
 			name: 'Butter',
-			expiryDate: new Date(Date.now() + (26 * d)),
+			expiryDate: new Date(Date.now() + (26 * MILLISECONDS_PER_DAY)),
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(29);
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendOutOfStockNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendExpirationNotification).not.toHaveBeenCalled();
 	});
 
-	it('EXPIRABLE - expiré : notification expiration, available mis à 0', async () => {
+	it('EXPIRABLE - expired: expiration notification, available set to 0', async () => {
 		const client = supertest(fastify.server);
-		const d = 24 * 60 * 60 * 1000;
 		const product: ProductInsert = {
 			leadTime: 90,
 			available: 6,
 			type: 'EXPIRABLE',
 			name: 'Milk',
-			expiryDate: new Date(Date.now() - (2 * d)),
+			expiryDate: new Date(Date.now() - (2 * MILLISECONDS_PER_DAY)),
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(0);
 		expect(notificationServiceMock.sendExpirationNotification).toHaveBeenCalledWith('Milk', product.expiryDate);
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
 		expect(notificationServiceMock.sendOutOfStockNotification).not.toHaveBeenCalled();
 	});
 
-	it('EXPIRABLE - non expiré et en rupture : état final observable', async () => {
+	it('EXPIRABLE - not expired and out of stock: observable final state', async () => {
 		const client = supertest(fastify.server);
-		const d = 24 * 60 * 60 * 1000;
 		const product: ProductInsert = {
 			leadTime: 15,
 			available: 0,
 			type: 'EXPIRABLE',
 			name: 'Yogurt',
-			expiryDate: new Date(Date.now() + (10 * d)),
+			expiryDate: new Date(Date.now() + (10 * MILLISECONDS_PER_DAY)),
 		};
 
-		const {orderId, productId} = database.transaction(tx => {
-			const [insertedProduct] = tx.insert(products).values(product).returning({productId: products.id}).all();
-			const order = tx.insert(orders).values([{}]).returning({orderId: orders.id}).get();
-			tx.insert(ordersToProducts).values([{orderId: order!.orderId, productId: insertedProduct.productId}]).run();
-			return {orderId: order!.orderId, productId: insertedProduct.productId};
-		});
+		const {orderId, productId} = createOrderWithProduct(product);
 
 		await client.post(`/orders/${orderId}/processOrder`).expect(200);
 
-		const updatedProduct = await database.query.products.findFirst({where: eq(products.id, productId)});
+		const updatedProduct = await findProduct(productId);
 		expect(updatedProduct!.available).toBe(0);
 		expect(notificationServiceMock.sendExpirationNotification).toHaveBeenCalledWith('Yogurt', product.expiryDate);
 		expect(notificationServiceMock.sendDelayNotification).not.toHaveBeenCalled();
@@ -317,7 +275,6 @@ describe('MyController Integration Tests', () => {
 	});
 
 	function createProducts(): ProductInsert[] {
-		const d = 24 * 60 * 60 * 1000;
 		return [
 			{
 				leadTime: 15, available: 30, type: 'NORMAL', name: 'USB Cable',
@@ -326,16 +283,16 @@ describe('MyController Integration Tests', () => {
 				leadTime: 10, available: 0, type: 'NORMAL', name: 'USB Dongle',
 			},
 			{
-				leadTime: 15, available: 30, type: 'EXPIRABLE', name: 'Butter', expiryDate: new Date(Date.now() + (26 * d)),
+				leadTime: 15, available: 30, type: 'EXPIRABLE', name: 'Butter', expiryDate: new Date(Date.now() + (26 * MILLISECONDS_PER_DAY)),
 			},
 			{
-				leadTime: 90, available: 6, type: 'EXPIRABLE', name: 'Milk', expiryDate: new Date(Date.now() - (2 * d)),
+				leadTime: 90, available: 6, type: 'EXPIRABLE', name: 'Milk', expiryDate: new Date(Date.now() - (2 * MILLISECONDS_PER_DAY)),
 			},
 			{
-				leadTime: 15, available: 30, type: 'SEASONAL', name: 'Watermelon', seasonStartDate: new Date(Date.now() - (2 * d)), seasonEndDate: new Date(Date.now() + (58 * d)),
+				leadTime: 15, available: 30, type: 'SEASONAL', name: 'Watermelon', seasonStartDate: new Date(Date.now() - (2 * MILLISECONDS_PER_DAY)), seasonEndDate: new Date(Date.now() + (58 * MILLISECONDS_PER_DAY)),
 			},
 			{
-				leadTime: 15, available: 30, type: 'SEASONAL', name: 'Grapes', seasonStartDate: new Date(Date.now() + (180 * d)), seasonEndDate: new Date(Date.now() + (240 * d)),
+				leadTime: 15, available: 30, type: 'SEASONAL', name: 'Grapes', seasonStartDate: new Date(Date.now() + (180 * MILLISECONDS_PER_DAY)), seasonEndDate: new Date(Date.now() + (240 * MILLISECONDS_PER_DAY)),
 			},
 		];
 	}
