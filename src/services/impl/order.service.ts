@@ -1,31 +1,18 @@
 import {type Cradle} from '@fastify/awilix';
-import {eq} from 'drizzle-orm';
 import {ProductService} from './product.service.js';
-import {orders, products} from '@/db/schema.js';
-import {type Database} from '@/db/type.js';
+import {ProductRepository} from '@/repositories/product.repository.js';
 
 export class OrderService {
 	private readonly ps: ProductService;
-	private readonly db: Database;
+	private readonly pr: ProductRepository;
 
-	public constructor({ps, db}: Pick<Cradle, 'ps' | 'db'>) {
+	public constructor({ps, pr}: Pick<Cradle, 'ps' | 'pr'>) {
 		this.ps = ps;
-		this.db = db;
+		this.pr = pr;
 	}
 
 	public async processOrder(orderId: number): Promise<void> {
-		const order = (await this.db.query.orders
-			.findFirst({
-				where: eq(orders.id, orderId),
-				with: {
-					products: {
-						columns: {},
-						with: {
-							product: true,
-						},
-					},
-				},
-			}))!;
+		const order = (await this.pr.getOrderWithProducts(orderId))!;
 
 		const {products: productList} = order;
 
@@ -35,7 +22,7 @@ export class OrderService {
 					case 'NORMAL': {
 						if (p.available > 0) {
 							p.available -= 1;
-							await this.db.update(products).set(p).where(eq(products.id, p.id));
+							await this.pr.updateProduct(p);
 						} else {
 							const {leadTime} = p;
 							if (leadTime > 0) {
@@ -50,7 +37,7 @@ export class OrderService {
 						const currentDate = new Date();
 						if (currentDate > p.seasonStartDate! && currentDate < p.seasonEndDate! && p.available > 0) {
 							p.available -= 1;
-							await this.db.update(products).set(p).where(eq(products.id, p.id));
+							await this.pr.updateProduct(p);
 						} else {
 							await this.ps.handleSeasonalProduct(p);
 						}
@@ -62,7 +49,7 @@ export class OrderService {
 						const currentDate = new Date();
 						if (p.available > 0 && p.expiryDate! > currentDate) {
 							p.available -= 1;
-							await this.db.update(products).set(p).where(eq(products.id, p.id));
+							await this.pr.updateProduct(p);
 						} else {
 							await this.ps.handleExpiredProduct(p);
 						}

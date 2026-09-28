@@ -6,12 +6,14 @@ import {mockDeep, type DeepMockProxy} from 'vitest-mock-extended';
 import {type INotificationService} from '../notifications.port.js';
 import {createDatabaseMock, cleanUp} from '../../utils/test-utils/database-tools.ts.js';
 import {ProductService} from './product.service.js';
+import {ProductRepository} from '@/repositories/product.repository.js';
 import {products, type Product} from '@/db/schema.js';
 import {type Database} from '@/db/type.js';
 
 describe('ProductService Tests', () => {
 	let notificationServiceMock: DeepMockProxy<INotificationService>;
 	let productService: ProductService;
+	let productRepository: ProductRepository;
 	let databaseMock: Database;
 	let databaseName: string;
 	let closeDatabase: () => void;
@@ -19,9 +21,12 @@ describe('ProductService Tests', () => {
 	beforeEach(async () => {
 		({databaseMock, databaseName, close: closeDatabase} = await createDatabaseMock());
 		notificationServiceMock = mockDeep<INotificationService>();
+		productRepository = new ProductRepository({
+			db: databaseMock,
+		});
 		productService = new ProductService({
 			ns: notificationServiceMock,
-			db: databaseMock,
+			pr: productRepository,
 		});
 	});
 
