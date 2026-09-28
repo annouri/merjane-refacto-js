@@ -17,16 +17,16 @@ export class OrderService {
 		const {products: productList} = order;
 
 		if (productList) {
-			for (const {product: p} of productList) {
-				switch (p.type) {
+			for (const {product} of productList) {
+				switch (product.type) {
 					case 'NORMAL': {
-						if (p.available > 0) {
-							p.available -= 1;
-							await this.pr.updateProduct(p);
+						if (product.available > 0) {
+							product.available -= 1;
+							await this.pr.updateProduct(product);
 						} else {
-							const {leadTime} = p;
+							const {leadTime} = product;
 							if (leadTime > 0) {
-								await this.ps.notifyDelay(leadTime, p);
+								await this.ps.notifyDelay(leadTime, product);
 							}
 						}
 
@@ -35,11 +35,11 @@ export class OrderService {
 
 					case 'SEASONAL': {
 						const currentDate = new Date();
-						if (currentDate > p.seasonStartDate! && currentDate < p.seasonEndDate! && p.available > 0) {
-							p.available -= 1;
-							await this.pr.updateProduct(p);
+						if (currentDate > product.seasonStartDate! && currentDate < product.seasonEndDate! && product.available > 0) {
+							product.available -= 1;
+							await this.pr.updateProduct(product);
 						} else {
-							await this.ps.handleSeasonalProduct(p);
+							await this.ps.handleSeasonalProduct(product);
 						}
 
 						break;
@@ -47,11 +47,11 @@ export class OrderService {
 
 					case 'EXPIRABLE': {
 						const currentDate = new Date();
-						if (p.available > 0 && p.expiryDate! > currentDate) {
-							p.available -= 1;
-							await this.pr.updateProduct(p);
+						if (product.available > 0 && product.expiryDate! > currentDate) {
+							product.available -= 1;
+							await this.pr.updateProduct(product);
 						} else {
-							await this.ps.handleExpiredProduct(p);
+							await this.ps.handleExpiredProduct(product);
 						}
 
 						break;
